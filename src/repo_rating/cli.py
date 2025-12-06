@@ -6,7 +6,7 @@ import click
 
 from .config import load_config
 from .log import setup_logging, get_logger
-from .analyzer import analyze_repo
+from .analyzer import analyze_repo, RepoPromptIterator, analyze_prepared
 from .github_client import list_user_repos
 
 
@@ -139,7 +139,6 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
     
     Use 'me' as USERNAME to analyze your own repos (including private).
     """
-    from .github_client import get_authenticated_user
     
     log = get_logger()
     config = ctx.obj["config"]
@@ -147,49 +146,14 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
     if model:
         config.model = model
     
-    # Handle 'me' - use authenticated user
-    is_me = username.lower() == "me"
-    if is_me:
-        if not config.github_token:
-            raise click.ClickException("GitHub token required to use 'me'. Set GITHUB_TOKEN.")
-        user_info = get_authenticated_user(config.github_token)
-        actual_username = user_info["login"]
-        log.info(f"Fetching your repos (as {actual_username})")
-    else:
-        actual_username = username
-        log.info(f"Fetching repos for user: {username}")
-    
-    # Fetch repos
-    user_arg = None if is_me else username
-    repos = list_user_repos(user_arg, config.github_token)
-    
-    # Filter to owned repos when using 'me'
-    if is_me:
-        repos = [r for r in repos if r["owner"]["login"] == actual_username]
-    
-    # Filter out forks, small repos, and excluded repos
-    repos = [r for r in repos if not r.get("fork")]
-    repos = [r for r in repos if r.get("size", 0) >= min_size]
-    
-    # Build exclusion set from CLI and config
-    exclude_set = set(exclude)  # CLI exclusions
-    exclude_set.update(config.exclude_repos)  # Config exclusions
-    if exclude_set:
-        before_count = len(repos)
-        repos = [r for r in repos if r["name"] not in exclude_set]
-        if before_count > len(repos):
-            log.info(f"Excluded {before_count - len(repos)} repos by blacklist")
-    
-    repos = sorted(repos, key=lambda r: r.get("pushed_at", ""), reverse=True)
-    repos = repos[:limit]
+    # Create iterator (fetches and filters repos)
+    repo_iter = RepoPromptIterator(username, config, exclude=exclude, min_size=min_size, limit=limit)
     
     # Show repos that will be analyzed
-    total_size = sum(r.get("size", 0) for r in repos)
-    click.echo(click.style(f"\n📦 {len(repos)} repositories to analyze ({total_size}KB total):\n", bold=True))
-    for r in repos:
-        size = r.get("size", 0)
-        name = r["name"]
-        click.echo(f"  • {name} ({size}KB)")
+    total_size = sum(r.get("size", 0) for r in repo_iter.repos)
+    click.echo(click.style(f"\n📦 {len(repo_iter)} repositories to analyze ({total_size}KB total):\n", bold=True))
+    for r in repo_iter.repos:
+        click.echo(f"  • {r['name']} ({r.get('size', 0)}KB)")
     click.echo()
     
     if output_dir:
@@ -198,27 +162,25 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
     results = []
     failed = []
     
-    for i, repo_info in enumerate(repos, 1):
-        repo_name = repo_info['full_name']
-        size_kb = repo_info.get('size', 0)
-        
-        click.echo(click.style(f"[{i}/{len(repos)}]", fg="cyan") + f" {repo_name} ({size_kb}KB)")
+    # Iterate and analyze
+    for i, prepared in enumerate(repo_iter, 1):
+        click.echo(click.style(f"[{i}/{len(repo_iter)}]", fg="cyan") + f" {prepared.full_name}")
         
         try:
-            result = analyze_repo(repo_name, config, use_cache=not no_cache)
+            result = analyze_prepared(prepared, config, use_cache=not no_cache)
             results.append(result)
             
             if output_dir:
-                out_file = output_dir / f"{repo_info['name']}.json"
+                out_file = output_dir / f"{prepared.name}.json"
                 out_file.write_text(result.model_dump_json(indent=2))
-                
+            
             # Brief summary
             tech = ", ".join(result.assessment.tech_stack[:3])
             click.echo(click.style(f"    ✓ ", fg="green") + f"{result.assessment.complexity} complexity | {tech}")
-                
+            
         except Exception as e:
             log.error(f"Failed: {e}")
-            failed.append((repo_name, str(e)))
+            failed.append((prepared.full_name, str(e)))
             click.echo(click.style(f"    ✗ Failed: ", fg="red") + str(e)[:60])
     
     # Summary
@@ -233,7 +195,6 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
         for name, err in failed:
             click.echo(f"  - {name}: {err[:50]}")
 
-    
     if not output_dir and results:
         click.echo(f"\nResults preview (use -o DIR to save all):")
         for result in results[:3]:
@@ -290,7 +251,7 @@ def report(ctx: click.Context, results_dir: Path, output: Path | None) -> None:
     Reads JSON files from RESULTS_DIR and generates a human-readable markdown report.
     """
     import json
-    from datetime import datetime
+    from .report_generator import generate_report_markdown
     
     log = get_logger()
     
@@ -312,73 +273,56 @@ def report(ctx: click.Context, results_dir: Path, output: Path | None) -> None:
         click.echo("No valid results to report")
         return
     
-    # Generate markdown
-    lines = [
-        "# Repository Analysis Report",
-        "",
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Repositories analyzed: {len(results)}",
-        "",
-        "---",
-        "",
-    ]
+    # Generate and write report
+    markdown = generate_report_markdown(results)
     
-    for r in results:
-        repo = r.get("repo", "Unknown")
-        model = r.get("model_used", "Unknown")
-        assessment = r.get("assessment", {})
-        metadata = r.get("metadata", {})
-        
-        # Header
-        lines.append(f"## {repo}")
-        lines.append("")
-        
-        # Quick info
-        langs = metadata.get("languages", {})
-        lang_str = ", ".join(f"{k} ({v}%)" for k, v in list(langs.items())[:3]) if langs else "Unknown"
-        lines.append(f"**Languages:** {lang_str}")
-        lines.append(f"**Model:** `{model}`")
-        lines.append(f"**Complexity:** {assessment.get('complexity', 'Unknown')}")
-        lines.append(f"**Type:** {assessment.get('project_type', 'Unknown')}")
-        lines.append("")
-        
-        # Summary
-        lines.append("### Summary")
-        lines.append(assessment.get("summary", "No summary available."))
-        lines.append("")
-        
-        # Tech stack
-        tech = assessment.get("tech_stack", [])
-        if tech:
-            lines.append("### Tech Stack")
-            lines.append(", ".join(tech))
-            lines.append("")
-        
-        # Notable for resume
-        notable = assessment.get("notable_for_resume", [])
-        if notable:
-            lines.append("### Notable Skills")
-            for skill in notable:
-                lines.append(f"- {skill}")
-            lines.append("")
-        
-        # Honest assessment
-        honest = assessment.get("honest_assessment", "")
-        if honest:
-            lines.append("### Assessment")
-            lines.append(f"> {honest}")
-            lines.append("")
-        
-        lines.append("---")
-        lines.append("")
-    
-    # Write output
     if output is None:
         output = results_dir / "report.md"
     
-    output.write_text("\n".join(lines))
+    output.write_text(markdown)
     click.echo(f"Report generated: {output}")
     click.echo(f"  {len(results)} repositories included")
+
+
+@main.command("generate-prompts")
+@click.argument("username")
+@click.option("--limit", default=10, help="Maximum number of repos to process")
+@click.option("--min-size", default=5, help="Minimum repo size in KB")
+@click.option("--exclude", "-x", multiple=True, help="Repo names to exclude (can be repeated)")
+@click.option("--output-dir", "-o", type=click.Path(path_type=Path), default=None,
+              help="Output directory (default: results/prompts)")
+@click.pass_context
+def generate_prompts(ctx: click.Context, username: str, limit: int, min_size: int,
+                     exclude: tuple[str, ...], output_dir: Path | None) -> None:
+    """Generate analysis prompts for manual use in chat interfaces.
+    
+    Creates .md files with full prompts ready to copy/paste into ChatGPT, Claude, etc.
+    Use 'me' as USERNAME to generate prompts for your own repos.
+    """
+    
+    config = ctx.obj["config"]
+    
+    # Create iterator (fetches and filters repos)
+    repo_iter = RepoPromptIterator(username, config, exclude=exclude, min_size=min_size, limit=limit)
+    
+    # Setup output dir
+    if output_dir is None:
+        output_dir = Path("results/prompts")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    click.echo(f"\n📝 Generating prompts for {len(repo_iter)} repos -> {output_dir}/\n")
+    
+    # Iterate and save prompts
+    for i, prepared in enumerate(repo_iter, 1):
+        click.echo(f"[{i}/{len(repo_iter)}] {prepared.full_name}...", nl=False)
+        
+        output_file = output_dir / f"{prepared.name}.md"
+        output_file.write_text(prepared.prompt)
+        
+        tokens_est = len(prepared.prompt) // 3
+        click.echo(f" ✓ ~{tokens_est:,} tokens")
+    
+    click.echo(f"\n✅ Prompts saved to {output_dir}/")
 
 
 SYNTHESIZE_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "synthesize.md"

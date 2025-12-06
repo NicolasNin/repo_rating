@@ -17,6 +17,203 @@ from .log import get_logger
 PROMPT_TEMPLATE_PATH = Path(__file__).parent.parent.parent / "prompts" / "analyze_repo.md"
 
 
+def get_selection_api_key(config: Config) -> tuple[str | None, str | None]:
+    """Get selection model and API key from config.
+    
+    Returns:
+        (selection_model, api_key) tuple. Both None if selection disabled.
+    """
+    if not config.selection.enabled:
+        return None, None
+    
+    model = config.selection.model
+    if model.startswith("mammouth/"):
+        return model, config.mammouth_api_key
+    else:
+        return model, config.openrouter_api_key
+
+
+def prepare_repo_prompt(
+    repo_path: Path,
+    metadata: RepoMetadata,
+    config: Config,
+) -> str:
+    """Build analysis prompt for a repo.
+    
+    Handles file filtering (including LLM selection if enabled) and prompt building.
+    
+    Args:
+        repo_path: Path to extracted repo
+        metadata: Repository metadata
+        config: Configuration object
+        
+    Returns:
+        Complete prompt string ready for LLM
+        
+    Raises:
+        ValueError: If no analyzable files found after filtering
+    """
+    log = get_logger()
+    
+    # Load prompt template
+    prompt_template = PROMPT_TEMPLATE_PATH.read_text()
+    
+    # Get selection model/key
+    selection_model, selection_api_key = get_selection_api_key(config)
+    
+    # Filter files
+    filter_result = filter_repo_files(
+        repo_path,
+        config.filtering,
+        selection_model=selection_model,
+        api_key=selection_api_key,
+    )
+    log.info(f"Filtered to {len(filter_result.files)} files ({filter_result.total_size} bytes)")
+    
+    if not filter_result.files:
+        raise ValueError("No analyzable code files found in repository")
+    
+    # Build and return prompt
+    return _build_prompt(prompt_template, metadata, filter_result.files)
+
+
+from dataclasses import dataclass
+from typing import Iterator
+
+
+@dataclass
+class PreparedRepo:
+    """A repo prepared for analysis."""
+    name: str
+    owner: str
+    full_name: str
+    metadata: RepoMetadata
+    prompt: str
+    repo_path: Path  # Temp path, caller should clean up
+
+class RepoPromptIterator:
+    """Iterator over user repos that exposes the repos list.
+    
+    Allows upfront display of repos before iteration.
+    """
+    
+    def __init__(
+        self,
+        username: str,
+        config: Config,
+        *,
+        exclude: tuple[str, ...] = (),
+        min_size: int = 5,
+        limit: int = 10,
+    ):
+        from .github_client import fetch_user_repos
+        
+        # Build exclusion set and fetch repos
+        exclude_set = set(exclude)
+        exclude_set.update(config.exclude_repos)
+        self.repos = fetch_user_repos(username, config.github_token, exclude=exclude_set, min_size=min_size, limit=limit)
+        self.config = config
+    
+    def __len__(self) -> int:
+        return len(self.repos)
+    
+    def __iter__(self) -> Iterator[PreparedRepo]:
+        from .github_client import fetch_repo_metadata, download_tarball
+        
+        log = get_logger()
+    
+        for repo in self.repos:
+            repo_name = repo["name"]
+            owner = repo["owner"]["login"]
+            full_name = f"{owner}/{repo_name}"
+            
+            try:
+                # Fetch metadata
+                metadata = fetch_repo_metadata(owner, repo_name, self.config.github_token)
+                
+                # Download repo
+                repo_path = download_tarball(owner, repo_name, self.config.github_token)
+                
+                # Build prompt
+                prompt = prepare_repo_prompt(repo_path, metadata, self.config)
+                
+                yield PreparedRepo(
+                    name=repo_name,
+                    owner=owner,
+                    full_name=full_name,
+                    metadata=metadata,
+                    prompt=prompt,
+                    repo_path=repo_path,
+                )
+                
+            except Exception as e:
+                log.warning(f"Failed to prepare {full_name}: {e}")
+                continue
+
+
+def analyze_prepared(
+    prepared: PreparedRepo,
+    config: Config,
+    use_cache: bool = True,
+) -> AnalysisResult:
+    """Analyze a prepared repo (prompt already built).
+    
+    This is the main entry point when using iter_repo_prompts.
+    Handles caching, LLM calls, and result building.
+    """
+    log = get_logger()
+    
+    # Hash prompt for cache key
+    prompt_hash = hash_prompt(prepared.prompt)
+    last_commit_hash = prepared.metadata.recent_commits[0].hash if prepared.metadata.recent_commits else None
+    cache_key = get_cache_key(prepared.full_name, last_commit_hash, prompt_hash, config.model)
+    
+    # Check cache
+    if use_cache:
+        cached = load_cached(config.cache_dir, cache_key)
+        if cached:
+            return cached
+    
+    # Estimate tokens and cost
+    estimated_tokens = len(prepared.prompt) // 3
+    from .llm_client import estimate_cost
+    cost = estimate_cost(config.model, estimated_tokens, output_tokens=800)
+    
+    if cost is not None:
+        log.info(f"Prompt: {len(prepared.prompt)} chars (~{estimated_tokens:,} tokens, est. ${cost:.4f})")
+    else:
+        log.info(f"Prompt: {len(prepared.prompt)} chars (~{estimated_tokens:,} tokens)")
+    
+    # Log prompt for debugging
+    from .log import log_prompt
+    log_prompt(prepared.full_name, config.model, prepared.prompt)
+    
+    # Select API key based on provider
+    if config.model.startswith("mammouth/"):
+        api_key = config.mammouth_api_key
+    else:
+        api_key = config.openrouter_api_key
+    
+    # Call LLM
+    response = call_llm(prepared.prompt, config.model, api_key)
+    assessment_data = parse_json_response(response)
+    
+    # Build result
+    assessment = Assessment.model_validate(assessment_data)
+    result = AnalysisResult(
+        repo=prepared.full_name,
+        analyzed_at=datetime.now(),
+        model_used=config.model,
+        metadata=prepared.metadata,
+        assessment=assessment,
+    )
+    
+    # Cache result
+    save_to_cache(config.cache_dir, cache_key, result)
+    
+    return result
+
+
 def analyze_repo(
     source: str,
     config: Config,
@@ -73,34 +270,8 @@ def _run_analysis(
     """Run the analysis pipeline."""
     log = get_logger()
     
-    # Load prompt template
-    prompt_template = PROMPT_TEMPLATE_PATH.read_text()
-    
-    # Filter files first (needed for cache key)
-    # Pass LLM selection config if enabled
-    selection_model = config.selection.model if config.selection.enabled else None
-    if selection_model:
-        if selection_model.startswith("mammouth/"):
-            selection_api_key = config.mammouth_api_key
-        else:
-            selection_api_key = config.openrouter_api_key
-    else:
-        selection_api_key = None
-    filter_result = filter_repo_files(
-        repo_path, 
-        config.filtering,
-        selection_model=selection_model,
-        api_key=selection_api_key,
-    )
-    log.info(f"Filtered to {len(filter_result.files)} files ({filter_result.total_size} bytes)")
-    
-    # Skip if no files after filtering
-    if not filter_result.files:
-        log.warning("No analyzable files found after filtering - skipping LLM call")
-        raise ValueError("No analyzable code files found in repository")
-    
-    # Build prompt
-    prompt = _build_prompt(prompt_template, metadata, filter_result.files)
+    # Build prompt (handles filtering, selection, template)
+    prompt = prepare_repo_prompt(repo_path, metadata, config)
     
     # Hash the ACTUAL prompt (includes filtered files) for cache key
     prompt_hash = hash_prompt(prompt)
@@ -116,7 +287,7 @@ def _run_analysis(
     # Estimate tokens and cost (~3 chars = 1 token for code)
     estimated_tokens = len(prompt) // 3
     from .llm_client import estimate_cost
-    cost = estimate_cost(config.model, estimated_tokens, output_tokens=500)
+    cost = estimate_cost(config.model, estimated_tokens, output_tokens=800)
     
     if cost is not None:
         log.info(f"Prompt: {len(prompt)} chars (~{estimated_tokens:,} tokens, est. ${cost:.4f})")

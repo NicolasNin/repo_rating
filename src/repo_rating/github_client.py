@@ -86,6 +86,71 @@ def get_authenticated_user(token: str) -> dict:
     return resp.json()
 
 
+def resolve_username(username: str, token: str | None) -> tuple[str, bool]:
+    """Resolve 'me' to actual username.
+    
+    Returns:
+        (actual_username, is_me) tuple
+    """
+    is_me = username.lower() == "me"
+    if is_me:
+        if not token:
+            raise ValueError("GitHub token required to use 'me'. Set GITHUB_TOKEN.")
+        user_info = get_authenticated_user(token)
+        return user_info["login"], True
+    return username, False
+
+
+def fetch_user_repos(
+    username: str,
+    token: str | None,
+    *,
+    exclude: set[str] | None = None,
+    min_size: int = 5,
+    limit: int = 10,
+    include_forks: bool = False,
+) -> list[dict]:
+    """Fetch, filter, and sort repos for a user.
+    
+    Handles 'me' resolution, excludes forks, applies size/exclusion filters.
+    
+    Returns:
+        List of repo dicts, sorted by recent activity
+    """
+    log = get_logger()
+    
+    actual_username, is_me = resolve_username(username, token)
+    
+    if is_me:
+        log.info(f"Fetching your repos (as {actual_username})")
+    else:
+        log.info(f"Fetching repos for user: {username}")
+    
+    # Fetch repos
+    user_arg = None if is_me else username
+    repos = list_user_repos(user_arg, token)
+    
+    # Filter to owned repos when using 'me'
+    if is_me:
+        repos = [r for r in repos if r["owner"]["login"] == actual_username]
+    
+    # Filter forks, size
+    if not include_forks:
+        repos = [r for r in repos if not r.get("fork")]
+    repos = [r for r in repos if r.get("size", 0) >= min_size]
+    
+    # Exclusions
+    if exclude:
+        before_count = len(repos)
+        repos = [r for r in repos if r["name"] not in exclude]
+        if before_count > len(repos):
+            log.info(f"Excluded {before_count - len(repos)} repos by blacklist")
+    
+    # Sort by recent activity and limit
+    repos = sorted(repos, key=lambda r: r.get("pushed_at", ""), reverse=True)
+    return repos[:limit]
+
+
 def get_repo_info(owner: str, repo: str, token: str | None = None) -> dict:
     """Fetch repository metadata from GitHub API."""
     log = get_logger()

@@ -3,6 +3,7 @@
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -157,7 +158,23 @@ class OpenRouterClient:
                     resp.raise_for_status()
                 
                 data = resp.json()
-                self._update_usage(data.get("usage"))
+                usage = data.get("usage")
+                self._update_usage(usage)
+                
+                # Log usage and cost
+                if usage:
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    price = get_model_price(model)
+                    
+                    prompt_cost = prompt_tokens * price.prompt / 1_000_000 if price.prompt else 0
+                    completion_cost = completion_tokens * price.completion / 1_000_000 if price.completion else 0
+                    total_cost = prompt_cost + completion_cost
+                    
+                    log.info(
+                        f"Usage: {prompt_tokens:,} in (${prompt_cost:.4f}) + "
+                        f"{completion_tokens:,} out (${completion_cost:.4f}) = ${total_cost:.4f}"
+                    )
                 
                 # Check for valid response structure
                 if "choices" not in data or not data["choices"]:
@@ -332,6 +349,10 @@ def get_model_price(model: str) -> ModelPrice:
     if model in _model_prices_cache:
         return _model_prices_cache[model]
     
+    # For Mammouth models, use local price file
+    if model.startswith("mammouth/"):
+        return _get_mammouth_price(model)
+    
     try:
         resp = httpx.get(OPENROUTER_MODELS_API, timeout=10)
         if resp.status_code != 200:
@@ -359,6 +380,38 @@ def get_model_price(model: str) -> ModelPrice:
     except Exception as e:
         log.debug(f"Failed to fetch model prices: {e}")
         return ModelPrice()
+
+
+# Mammouth prices loaded from local JSON
+_mammouth_prices: dict | None = None
+MAMMOUTH_PRICES_PATH = Path(__file__).parent / "mammouth_prices.json"
+
+
+def _get_mammouth_price(model: str) -> ModelPrice:
+    """Get price for a Mammouth model from local JSON file."""
+    global _mammouth_prices, _model_prices_cache
+    
+    # Strip the mammouth/ prefix
+    model_name = model.removeprefix("mammouth/")
+    
+    # Load prices if not loaded
+    if _mammouth_prices is None:
+        if MAMMOUTH_PRICES_PATH.exists():
+            _mammouth_prices = json.loads(MAMMOUTH_PRICES_PATH.read_text())
+        else:
+            _mammouth_prices = {}
+    
+    # Look up price
+    if model_name in _mammouth_prices:
+        price_data = _mammouth_prices[model_name]
+        price = ModelPrice(
+            prompt=price_data.get("input"),
+            completion=price_data.get("output"),
+        )
+        _model_prices_cache[model] = price
+        return price
+    
+    return ModelPrice()
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int = 500) -> float | None:

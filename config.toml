@@ -6,7 +6,7 @@ cache_dir = "~/.repo_rating/cache"
 # Repos to always skip (by name, not full path)
 exclude_repos = [
     "stake_various",      # Fork of hummingbot, not original work
-    "comethlib",          # Old game project, not relevant
+    "compteCommun"        
 ]
 
 [models]
