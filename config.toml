@@ -1,0 +1,143 @@
+# Repo Rating - Configuration
+
+[defaults]
+model = "anthropic/claude-sonnet-4-20250514"
+cache_dir = "~/.repo_rating/cache"
+# Repos to always skip (by name, not full path)
+exclude_repos = [
+    "stake_various",      # Fork of hummingbot, not original work
+    "comethlib",          # Old game project, not relevant
+]
+
+[models]
+# Smaller/cheaper model for testing (~$0.01 per analysis)
+test = "anthropic/claude-3-haiku"
+# Free model (slow but no cost) - good for testing prompts
+free = "qwen/qwen3-coder:free"
+# Mock model - returns placeholder response, no API call
+mock = "mock"
+
+
+[selection]
+# LLM-based file selection (two-pass approach)
+enabled = true
+model = "mammouth/gpt-4.1-mini"
+
+[filtering]
+# Size thresholds in bytes for strategy selection
+small_threshold = 50000    # < 50KB: include everything
+medium_threshold = 500000  # < 500KB: filter aggressively
+
+# Patterns to always exclude (glob format)
+exclude_patterns = [
+    # Python compiled/cache
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    
+    # Version control / git
+    ".git",
+    ".svn",
+    ".gitignore",
+    ".gitattributes",
+    
+    # Package managers & dependencies
+    "node_modules",
+    "vendor",
+    "*.lock",
+    "package-lock.json",
+    "poetry.lock",
+    "yarn.lock",
+    
+    # Build artifacts
+    "dist",
+    "build",
+    "*.egg-info",
+    
+    # Minified/compiled assets
+    "*.min.js",
+    "*.min.css",
+    "*.bundle.js",
+    "*.chunk.js",
+    
+    # Virtual environments
+    "venv",
+    ".venv",
+    "env",
+    
+    # IDE/editor
+    ".idea",
+    ".vscode",
+    
+    # Framework generated files
+    "*/migrations/*.py",     # Django migrations
+    "**/migrations/0*.py",   # Django migrations (numbered)
+    "*.generated.*",         # Any generated file
+    
+    # LLM outputs / reports (can bias analysis)
+    "synthesis",             # Synthesis reports folder
+    "reports",               # Reports folder  
+    "outputs",               # Outputs folder
+    "*_synthesis.md",        # LLM synthesis files
+    "*_analysis.md",         # LLM analysis files
+    
+    # Binary/media files
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+    "*.svg",
+    "*.mp3",
+    "*.mp4",
+    "*.zip",
+    "*.tar.gz",
+    "*.pdf",
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    "*.json",        # ABIs, package.json, etc.
+    "*.pkl",         # Pickle files
+    "*.pickle",
+]
+
+# File extensions to include (when filtering for medium/large repos)
+include_extensions = [
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".rb",
+    ".php",
+    ".swift",
+    ".kt",
+    ".scala",
+    ".sh",
+    ".bash",
+    ".md",
+    ".txt",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".xml",
+    ".sql",
+    ".html",
+    ".css",
+    ".dockerfile",
+]
+
+[logging]
+console_level = "INFO"
+file_level = "DEBUG"
