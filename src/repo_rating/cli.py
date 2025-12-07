@@ -156,8 +156,10 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
         click.echo(f"  • {r['name']} ({r.get('size', 0)}KB)")
     click.echo()
     
-    if output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
+    # Setup output dir: results/{username}/assessments/
+    if output_dir is None:
+        output_dir = Path(f"results/{repo_iter.username}/assessments")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     results = []
     failed = []
@@ -170,9 +172,8 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
             result = analyze_prepared(prepared, config, use_cache=not no_cache)
             results.append(result)
             
-            if output_dir:
-                out_file = output_dir / f"{prepared.name}.json"
-                out_file.write_text(result.model_dump_json(indent=2))
+            out_file = output_dir / f"{prepared.name}.json"
+            out_file.write_text(result.model_dump_json(indent=2))
             
             # Brief summary
             tech = ", ".join(result.assessment.tech_stack[:3])
@@ -185,10 +186,10 @@ def analyze_user(ctx: click.Context, username: str, limit: int, no_cache: bool,
     
     # Summary
     click.echo(f"\n{'='*60}")
-    if len(results) == len(repos):
-        click.echo(click.style(f"✓ Completed: {len(results)}/{len(repos)} repos analyzed", fg="green", bold=True))
+    if len(results) == len(repo_iter):
+        click.echo(click.style(f"✓ Completed: {len(results)}/{len(repo_iter)} repos analyzed", fg="green", bold=True))
     else:
-        click.echo(click.style(f"Completed: {len(results)}/{len(repos)} repos analyzed", fg="yellow", bold=True))
+        click.echo(click.style(f"Completed: {len(results)}/{len(repo_iter)} repos analyzed", fg="yellow", bold=True))
     
     if failed:
         click.echo(click.style(f"Failed ({len(failed)}):", fg="red"))
@@ -305,9 +306,9 @@ def generate_prompts(ctx: click.Context, username: str, limit: int, min_size: in
     # Create iterator (fetches and filters repos)
     repo_iter = RepoPromptIterator(username, config, exclude=exclude, min_size=min_size, limit=limit)
     
-    # Setup output dir
+    # Setup output dir: results/{username}/prompts/
     if output_dir is None:
-        output_dir = Path("results/prompts")
+        output_dir = Path(f"results/{repo_iter.username}/prompts")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     click.echo(f"\n📝 Generating prompts for {len(repo_iter)} repos -> {output_dir}/\n")

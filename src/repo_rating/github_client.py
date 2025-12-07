@@ -319,6 +319,12 @@ def list_user_repos(username: str | None = None, token: str | None = None) -> li
             params={"per_page": 100, "page": page, "sort": "updated"},
             timeout=30,
         )
+        
+        # Handle rate limiting
+        if resp.status_code == 403 and "rate limit" in resp.text.lower():
+            reset_time = resp.headers.get("X-RateLimit-Reset", "unknown")
+            raise RuntimeError(f"GitHub rate limit exceeded. Resets at {reset_time}. Use a GitHub token for higher limits.")
+        
         resp.raise_for_status()
         
         batch = resp.json()

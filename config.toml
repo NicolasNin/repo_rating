@@ -21,8 +21,9 @@ mock = "mock"
 [selection]
 # LLM-based file selection (two-pass approach)
 enabled = true
-model = "mammouth/gpt-4.1-mini"
-
+#model = "mammouth/gpt-4.1-mini"
+model = "qwen/qwen3-coder"
+free = "qwen/qwen3-coder:free"
 [filtering]
 # Size thresholds in bytes for strategy selection
 small_threshold = 50000    # < 50KB: include everything

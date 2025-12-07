@@ -100,6 +100,9 @@ def filter_repo_files(
         except Exception as e:
             log.debug(f"Could not read {path}: {e}")
     
+    # Sort files by path for deterministic ordering (cache key stability)
+    files.sort(key=lambda f: f.path)
+    
     return FilterResult(
         files=files,
         total_size=sum(f.size for f in files),

@@ -106,7 +106,10 @@ class RepoPromptIterator:
         min_size: int = 5,
         limit: int = 10,
     ):
-        from .github_client import fetch_user_repos
+        from .github_client import fetch_user_repos, resolve_username
+        
+        # Resolve 'me' to actual username
+        self.username, _ = resolve_username(username, config.github_token)
         
         # Build exclusion set and fetch repos
         exclude_set = set(exclude)
@@ -342,8 +345,11 @@ def _build_prompt(template: str, metadata: RepoMetadata, files: list[FileContent
     for f in files:
         files_text += f"\n### {f.path}\n```\n{f.content}\n```\n"
     
-    # Format languages
-    languages_text = ", ".join(f"{lang} ({pct}%)" for lang, pct in metadata.languages.items())
+    # Format languages (sorted by percentage for deterministic output)
+    languages_text = ", ".join(
+        f"{lang} ({pct}%)" 
+        for lang, pct in sorted(metadata.languages.items(), key=lambda x: (-x[1], x[0]))
+    )
     
     return Template(template).safe_substitute(
         today=datetime.now().strftime("%Y-%m-%d"),
