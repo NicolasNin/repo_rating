@@ -27,6 +27,7 @@ repo-rating analyze-user username
 ```
 
 ## Configuration
+For github api key: https://github.com/settings/tokens
 
 - `config.toml` - General settings (filtering patterns, model defaults)
 - `config_secret.toml` - API keys (gitignored)

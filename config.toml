@@ -1,7 +1,8 @@
 # Repo Rating - Configuration
 
 [defaults]
-model = "anthropic/claude-sonnet-4-20250514"
+#model = "anthropic/claude-sonnet-4-20250514"
+model = "mammouth/claude-opus-4-5" #expensive 5/25
 cache_dir = "~/.repo_rating/cache"
 # Repos to always skip (by name, not full path)
 exclude_repos = [
@@ -21,8 +22,9 @@ mock = "mock"
 [selection]
 # LLM-based file selection (two-pass approach)
 enabled = true
-#model = "mammouth/gpt-4.1-mini"
-model = "qwen/qwen3-coder"
+#model = "mammouth/gpt-4.1-mini" #0.4 .6
+model = "mammouth/qwen3-coder"  #0.5 2 
+#model = "qwen/qwen3-coder"
 free = "qwen/qwen3-coder:free"
 [filtering]
 # Size thresholds in bytes for strategy selection

@@ -129,16 +129,17 @@ def fetch_user_repos(
     # Fetch repos
     user_arg = None if is_me else username
     repos = list_user_repos(user_arg, token)
-    
+    print("AZEAZEAZ",len(repos))
     # Filter to owned repos when using 'me'
     if is_me:
         repos = [r for r in repos if r["owner"]["login"] == actual_username]
-    
+
     # Filter forks, size
     if not include_forks:
         repos = [r for r in repos if not r.get("fork")]
     repos = [r for r in repos if r.get("size", 0) >= min_size]
-    
+    print("AZEAZEAZ",len(repos),min_size)
+
     # Exclusions
     if exclude:
         before_count = len(repos)
