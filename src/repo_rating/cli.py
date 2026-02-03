@@ -285,6 +285,66 @@ def report(ctx: click.Context, results_dir: Path, output: Path | None) -> None:
     click.echo(f"  {len(results)} repositories included")
 
 
+@main.command("generate-prompt")
+@click.argument("source")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
+              help="Write prompt to file")
+@click.pass_context
+def generate_prompt(ctx: click.Context, source: str, output: Path | None) -> None:
+    """Generate a single prompt for a repository.
+    
+    SOURCE can be:
+      - GitHub URL: https://github.com/owner/repo
+      - GitHub shorthand: owner/repo
+      - Local path: /path/to/repo
+    """
+    import shutil
+    from .analyzer import prepare_repo_prompt, analyze_local_repo
+    from .github_client import parse_repo_source, fetch_repo_metadata, download_tarball
+    
+    log = get_logger()
+    config = ctx.obj["config"]
+    
+    log.info(f"Generating prompt for: {source}")
+    
+    cleanup_path = None
+    
+    try:
+        # Check if it's a local path first
+        if Path(source).exists():
+            repo_path = Path(source).resolve()
+            metadata = analyze_local_repo(repo_path)
+        else:
+            # GitHub source - parse and fetch
+            owner, repo = parse_repo_source(source, config.github_token)
+            log.info(f"Fetching {owner}/{repo}")
+            metadata = fetch_repo_metadata(owner, repo, config.github_token)
+            repo_path = download_tarball(owner, repo, config.github_token)
+            cleanup_path = repo_path.parent
+            
+        # Generate prompt
+        prompt = prepare_repo_prompt(repo_path, metadata, config)
+        
+        # Output
+        if output:
+            output.write_text(prompt)
+            click.echo(f"Prompt written to: {output}")
+            
+            # Show token estimate
+            tokens_est = len(prompt) // 3
+            click.echo(f"Size: ~{tokens_est:,} tokens")
+        else:
+            click.echo(prompt)
+            
+    except Exception as e:
+        log.error(f"Failed to generate prompt: {e}")
+        raise click.ClickException(str(e))
+    finally:
+        if cleanup_path and cleanup_path.exists():
+            log.debug(f"Cleaning up temp dir: {cleanup_path}")
+            shutil.rmtree(cleanup_path, ignore_errors=True)
+
+
 @main.command("generate-prompts")
 @click.argument("username")
 @click.option("--limit", default=10, help="Maximum number of repos to process")
